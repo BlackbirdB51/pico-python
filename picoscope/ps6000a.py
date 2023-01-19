@@ -53,13 +53,14 @@ import math
 # to load the proper dll
 import platform
 
+from enum import IntEnum
 # Do not import or use ill definied data types
 # such as short int or long
 # use the values specified in the h file
 # float is always defined as 32 bits
 # double is defined as 64 bits
 from ctypes import byref, POINTER, create_string_buffer, c_float, c_int8, c_double,\
-   c_int16, c_uint16, c_int32, c_uint32, c_int64, c_uint64, c_void_p, CFUNCTYPE
+   c_int16, c_uint16, c_int32, c_uint32, c_int64, c_uint64, c_void_p, CFUNCTYPE, Structure
 from ctypes import c_int32 as c_enum
 
 from picoscope.picobase import _PicoscopeBase
@@ -110,6 +111,62 @@ def updateFirmwareProgress(function):
     return callback(function)
 
 
+class PICO_TRIGGER_CHANNEL_PROPERTIES(Structure):
+    _pack_ = 1
+    _fields_ = [("thresholdUpper", c_int16),
+                ("thresholdUpperHysteresis", c_uint16),
+                ("thresholdLower", c_int16),
+                ("thresholdLowerHysteresis", c_uint16),
+                ("channel", c_uint32)]
+
+
+class PICO_CONDITION(Structure):
+    _pack_ = 1
+    _fields_ = [("source", c_uint32),
+                ("condition", c_uint32)]
+
+
+class PICO_DIRECTION(Structure):
+    _pack_ = 1
+    _fields_ = [("channel", c_uint32),
+                ("direction", c_uint32),
+                ("thresholdMode", c_uint32)]
+
+
+class PICO_TRIGGER_STATE(IntEnum):
+    PICO_CONDITION_DONT_CARE = 0,
+    PICO_CONDITION_TRUE = 1
+    PICO_CONDITION_FALSE = 2
+
+
+class PICO_THRESHOLD_DIRECTION(IntEnum):
+    PICO_ABOVE = 0  # , //using upper threshold
+    PICO_BELOW = 1  # , //using upper threshold
+    PICO_RISING = 2  # , // using upper threshold
+    PICO_FALLING = 3  # , // using upper threshold
+    PICO_RISING_OR_FALLING = 4  # , // using both thresholds
+    PICO_ABOVE_LOWER = 5  # , // using lower threshold
+    PICO_BELOW_LOWER = 6  # , // using lower threshold
+    PICO_RISING_LOWER = 7  # , // using lower threshold
+    PICO_FALLING_LOWER = 8  # , // using lower threshold
+
+    # Windowing using both thresholds
+    PICO_INSIDE = PICO_ABOVE,
+    PICO_OUTSIDE = PICO_BELOW,
+    PICO_ENTER = PICO_RISING,
+    PICO_EXIT = PICO_FALLING,
+    PICO_ENTER_OR_EXIT = PICO_RISING_OR_FALLING,
+    PICO_POSITIVE_RUNT = 9,
+    # PICO_NEGATIVE_RUNT
+    # no trigger set
+    PICO_NONE = PICO_RISING
+
+
+class PICO_THRESHOLD_MODE(IntEnum):
+    PICO_LEVEL = 0  # Active when input is above or below a single threshold
+    PICO_WINDOW = 1  # Active when input is between two thresholds
+
+
 class PS6000a(_PicoscopeBase):
     """The following are low-level functions for the ps6000A.
 
@@ -124,7 +181,7 @@ class PS6000a(_PicoscopeBase):
 
     NUM_CHANNELS = 4
     CHANNELS = {"A": 0, "B": 1, "C": 2, "D": 3,
-                "External": 4, "MaxChannels": 4, "TriggerAux": 5}
+                "External": 1000, "MaxChannels": 4, "TriggerAux": 1001}
 
     CHANNEL_COUPLINGS = {"DC50": 2, "DC": 1, "AC": 0}
 
@@ -184,7 +241,7 @@ class PS6000a(_PicoscopeBase):
     # EXT/AUX seems to have an imput impedence of 50 ohm (PS6403B)
     EXT_MAX_VALUE = 32767
     EXT_MIN_VALUE = -32767
-    EXT_RANGE_VOLTS = 1
+    EXT_RANGE_VOLTS = 5
 
     WAVE_TYPES = {"Sine": 0, "Square": 1, "Triangle": 2,
                   "RampUp": 3, "RampDown": 4,
@@ -469,6 +526,67 @@ class PS6000a(_PicoscopeBase):
                                              c_uint32(timeout_ms * 1000))
         self.checkResult(m)
 
+    def setSimpleTriggerExt(self, threshold_V=0, direction="Rising",
+                            delay=0, timeout_ms=100, enabled=True):
+        """Set a simple trigger but for the external input."""
+        channelConditions = (PICO_CONDITION * 1)()
+        channelConditions[0] = PICO_CONDITION(self.CHANNELS["TriggerAux"], PICO_TRIGGER_STATE.PICO_CONDITION_TRUE)
+        self._lowLevelSetTriggerChannelConditions(channelConditions,
+                                                  self.ACTIONS["clear_all"] | self.ACTIONS["add"])
+        directions = (PICO_DIRECTION * 1)()
+        directions[0] = PICO_DIRECTION(self.CHANNELS["TriggerAux"], self.THRESHOLD_TYPE[direction], PICO_THRESHOLD_MODE.PICO_LEVEL)
+        self._lowLevelSetTriggerChannelDirections(directions)
+        properties = (PICO_TRIGGER_CHANNEL_PROPERTIES * 1)()
+        properties[0] = PICO_TRIGGER_CHANNEL_PROPERTIES()
+        # TODO
+
+    def _lowLevelSetTriggerChannelConditions(self, channelConditions, action):
+        """You need a ConditionsArray as `channelConditions`:
+        .. code::
+
+            channelConditions = (PICO_CONDITION * 2)()
+            channelConditions[0] = PICO_CONDITION(self.CHANNELS["TriggerAux"], PICO_TRIGGER_STATE.PICO_CONDITION_TRUE)
+            channelConditions[1] = PICO_CONDITION(self.CHANNELS["A"], PICO_TRIGGER_STATE.PICO_CONDITION_DONT_CARE)
+        """
+        # TODO test
+        nChannelConditions = len(channelConditions)
+        m = self.lib.ps6000aSetTriggerChannelConditions(
+            c_int16(self.handle),
+            byref(channelConditions),
+            c_int16(nChannelConditions),
+            c_uint32(action),
+        )
+        self.checkResult(m)
+
+    def _lowLevelSetTriggerChannelProperties(self, channelProperties, timeout_ms):
+        # TODO test
+        nChannelProperties = len(channelProperties)
+        m = self.lib.ps6000aSetTriggerChannelProperties(
+            c_int16(self.handle),
+            c_void_p(channelProperties),  # TODO
+            c_int16(nChannelProperties),
+            c_int16(0),  # not used
+            c_uint32(int(timeout_ms) * 1000),
+        )
+        self.checkResult(m)
+
+    def _lowLevelSetTriggerChannelDirections(self, directions):
+        """directions is an array of structures"""
+        # TODO test
+        nDirections = len(directions)
+        m = self.lib.ps6000aSetTriggerChannelDirections(
+            c_int16(self.handle),
+            c_void_p(directions),  # TODO
+            c_int16(nDirections),
+        )
+        self.checkResult(m)
+
+    def _lowLevelSetTriggerDelay(self, delay):
+        # TODO test
+        """Wait `delay` many samples between trigger occurring and first sample"""
+        m = self.lib.ps6000aSetTriggerDelay(c_int16(self.handle), c_uint64(delay))
+        self.checkResult(m)
+
     # Start / stop measurement
     def _lowLevelStop(self):
         m = self.lib.ps6000aStop(c_int16(self.handle))
@@ -672,18 +790,6 @@ class PS6000a(_PicoscopeBase):
     # Complicated triggering
     # need to understand structs for some of this to work
     def _lowLevelGetValuesTriggerTimeOffsetBulk():
-        raise NotImplementedError()
-
-    def _lowLevelSetTriggerChannelConditions():
-        raise NotImplementedError()
-
-    def _lowLevelSetTriggerChannelDirections():
-        raise NotImplementedError()
-
-    def _lowLevelSetTriggerChannelProperties():
-        raise NotImplementedError()
-
-    def _lowLevelSetTriggerDelay():
         raise NotImplementedError()
 
     def _lowLevelSetTriggerDigitalPortProperties(self):
